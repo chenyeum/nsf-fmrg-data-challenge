@@ -1,0 +1,31 @@
+# Python
+__pycache__/
+*.pyc
+.ipynb_checkpoints/
+
+# Local data and generated outputs
+data/raw/**/*.mat
+data/raw/**/*.tif
+data/raw/**/*.tiff
+data/raw/**/*.ASC
+data/raw/**/*.asc
+processed_data/
+*.mp4
+*.gif
+
+# Keep folder placeholders
+!data/raw/**/.gitkeep
+!processed_data/.gitkeep
+
+# LaTeX build files
+*.aux
+*.log
+*.out
+*.toc
+*.synctex.gz
+*.fls
+*.fdb_latexmk
+
+# OS
+.DS_Store
+Thumbs.db
