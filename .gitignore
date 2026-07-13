@@ -2,6 +2,7 @@
 __pycache__/
 *.pyc
 .ipynb_checkpoints/
+.venv/
 
 # Local data and generated outputs
 data/raw/**/*.mat
@@ -9,6 +10,7 @@ data/raw/**/*.tif
 data/raw/**/*.tiff
 data/raw/**/*.ASC
 data/raw/**/*.asc
+data/*.zip
 processed_data/
 *.mp4
 *.gif
