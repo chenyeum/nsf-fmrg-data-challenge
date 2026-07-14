@@ -11,7 +11,12 @@ THERMAL_FPS = 50.0
 SCAN_SPEED_MM_PER_S = 10.0
 THERMAL_MM_PER_FRAME = SCAN_SPEED_MM_PER_S / THERMAL_FPS
 EXTRACTED_THERMAL_FRAMES = int(round((COMMON_X_END_MM - COMMON_X_START_MM) / THERMAL_MM_PER_FRAME))
-
+_WIDTH_STATS_DTYPE = [
+    ('x_mm', 'f8'), ('valid', '?'), ('nan_frac', 'f8'),
+    ('width_mean_mm', 'f8'), ('width_std_mm', 'f8'),
+    ('boundary_left_mean_mm', 'f8'), ('boundary_right_mean_mm', 'f8'),
+    ('edge_roughness_mm', 'f8'), ('n_cols_used', 'i8'),
+]
 
 def natural_key(s):
     s = str(s)
@@ -236,3 +241,90 @@ def display_shear_grid(x_mm, y_mm, slope_eff, strength=1.0, reference_x=None):
     Y_plot = y_mm[:, None] - correction[None, :]
     X_plot = np.tile(x_mm[None, :], (len(y_mm), 1))
     return X_plot, Y_plot, correction
+
+def _column_track_boundary(col, y_mm, mad_k=3.0, min_valid_points=5):
+    finite = np.isfinite(col)
+    if finite.sum() < min_valid_points:
+        return None, None, False
+
+    med = np.median(col[finite])
+    mad = 1.4826 * np.median(np.abs(col[finite] - med))
+    thr = mad_k * max(mad, 1e-9)
+
+    deviation = med - col           
+    mask = deviation > thr          
+
+    if not mask.any():
+        return None, None, False
+
+    track_y = y_mm[mask]
+    left, right = float(track_y.min()), float(track_y.max())
+    return left, right, True
+
+def local_width_stats_at_window(Z_mm, x_mm, y_mm, x_center_mm, window_mm,
+                                 nan_frac_max=0.6, min_valid_cols=5, mad_k=3.0):
+    # 1. locate columns whose physical x falls inside this window
+    col_mask = (x_mm >= x_center_mm - window_mm / 2) & (x_mm <= x_center_mm + window_mm / 2)
+    col_indices = np.flatnonzero(col_mask)
+
+    # 2. window falls outside the height map's covered x range
+    if col_indices.size == 0:
+        return {'x_mm': x_center_mm, 'valid': False, 'nan_frac': 1.0,
+                'width_mean_mm': np.nan, 'width_std_mm': np.nan,
+                'boundary_left_mean_mm': np.nan, 'boundary_right_mean_mm': np.nan,
+                'edge_roughness_mm': np.nan, 'n_cols_used': 0}
+
+    # 3. first gate: overall NaN fraction across the selected block
+    block = Z_mm[:, col_indices]
+    nan_frac = float(np.isnan(block).sum() / block.size)
+    if nan_frac > nan_frac_max:
+        return {'x_mm': x_center_mm, 'valid': False, 'nan_frac': nan_frac,
+                'width_mean_mm': np.nan, 'width_std_mm': np.nan,
+                'boundary_left_mean_mm': np.nan, 'boundary_right_mean_mm': np.nan,
+                'edge_roughness_mm': np.nan, 'n_cols_used': 0}
+
+    # 4. per-column boundary detection, keep only successful columns
+    lefts, rights, widths = [], [], []
+    for idx in col_indices:
+        left, right, ok = _column_track_boundary(Z_mm[:, idx], y_mm, mad_k=mad_k)
+        if ok:
+            lefts.append(left)
+            rights.append(right)
+            widths.append(right - left)
+    n_valid_cols = len(widths)
+
+    # 5. second gate: enough columns must have succeeded to trust the average
+    if n_valid_cols < min_valid_cols:
+        return {'x_mm': x_center_mm, 'valid': False, 'nan_frac': nan_frac,
+                'width_mean_mm': np.nan, 'width_std_mm': np.nan,
+                'boundary_left_mean_mm': np.nan, 'boundary_right_mean_mm': np.nan,
+                'edge_roughness_mm': np.nan, 'n_cols_used': n_valid_cols}
+
+    # 6. aggregate per-column results into this window's summary stats
+    lefts = np.array(lefts)
+    rights = np.array(rights)
+    widths = np.array(widths)
+    return {
+        'x_mm': x_center_mm,
+        'valid': True,
+        'nan_frac': nan_frac,
+        'width_mean_mm': float(widths.mean()),
+        'width_std_mm': float(widths.std()),
+        'boundary_left_mean_mm': float(lefts.mean()),
+        'boundary_right_mean_mm': float(rights.mean()),
+        'edge_roughness_mm': float((lefts.std() + rights.std()) / 2),
+        'n_cols_used': n_valid_cols,
+    }
+
+
+def extract_local_width_stats(Z_mm, x_mm, y_mm, x_centers_mm, window_mm,
+                               nan_frac_max=0.6, min_valid_cols=5, mad_k=3.0):
+    x_centers_mm = np.asarray(x_centers_mm)
+    out = np.empty(len(x_centers_mm), dtype=_WIDTH_STATS_DTYPE)
+    for i, xc in enumerate(x_centers_mm):
+        r = local_width_stats_at_window(
+            Z_mm, x_mm, y_mm, xc, window_mm,
+            nan_frac_max=nan_frac_max, min_valid_cols=min_valid_cols, mad_k=mad_k,
+        )
+        out[i] = tuple(r[name] for name, _ in _WIDTH_STATS_DTYPE)
+    return out
