@@ -10,15 +10,16 @@
   The zips are still in `data/` (gitignored, safe to delete). `data/*.zip` and
   `data/raw/**` are gitignored — not meant to be committed.
 
-## Code ownership boundary (decided 2026-07-14)
-- `src/nsf_fmrg_data.py` lines 1–242 are **official starter code** (organizer upload
-  d82b222); only the Task-1 functions at lines ~245–330 are ours (commit 265df79).
-- **Decision: stop adding to the official file.** All new code goes into a new module
-  `src/preprocessing.py` that imports from `nsf_fmrg_data`. Official functions are
-  wrapped, never edited — keeps the official diff minimal and organizer patches
-  (they have shipped `PATCH_README.md` before) merge-clean.
-- Optional later cleanup: migrate the Task-1 functions into `preprocessing.py` too
-  (notebook imports would need updating). Not urgent.
+## Code ownership boundary (decided 2026-07-14, migration done 2026-07-15)
+- `src/nsf_fmrg_data.py` is now **official starter code only** (organizer upload
+  d82b222) — the Task-1 functions have been moved out.
+- `src/preprocessing.py` holds all of our own code: `_WIDTH_STATS_DTYPE`,
+  `_column_track_boundary`, `local_width_stats_at_window`, `extract_local_width_stats`
+  (moved 2026-07-15, unchanged logic — verified functionally identical), plus all
+  future Task 2–5 code. It imports from `nsf_fmrg_data` rather than editing it, so
+  organizer patches (they have shipped `PATCH_README.md` before) stay merge-clean.
+- No notebook imported the Task-1 functions directly (confirmed by repo-wide grep),
+  so the migration required no notebook updates.
 - Division of labor for Task 2: **the user writes `src/preprocessing.py` himself**;
   Claude then runs the 53-tile acceptance sweep (criteria below).
 
@@ -55,9 +56,10 @@ From `paper/2607.07965v1.pdf`:
   1–5 matched 1:1, "accuracy" reconciled as informal phrasing for prediction error (MAE).
 
 ## Task 1 — height-map width/boundary/roughness extraction: DONE + smoke-tested ✅
-Implemented in `src/nsf_fmrg_data.py` (~245–330): `_column_track_boundary`,
-`local_width_stats_at_window`, `extract_local_width_stats` (numpy structured array
-output, `_WIDTH_STATS_DTYPE`). Design details unchanged from previous plan version.
+Implemented in `src/preprocessing.py` (moved from `nsf_fmrg_data.py` 2026-07-15):
+`_column_track_boundary`, `local_width_stats_at_window`, `extract_local_width_stats`
+(numpy structured array output, `_WIDTH_STATS_DTYPE`). Design details unchanged from
+previous plan version.
 
 **Smoke test ran 2026-07-14 on all four tracks** (400 windows each, window = 0.2 mm,
 defaults `nan_frac_max=0.6, min_valid_cols=5, mad_k=3.0`):
@@ -123,23 +125,191 @@ band, contrast 2–4.8× vs substrate median — holds even on heavily spattered
 - End tiles (8_01, 10_01, 14_01, 21_01 — rounded end-cap, band covers partial width,
   contrast diluted to ~1.8×) are **allowed to fail**; ≤1–2 invalid tiles per track.
 
-## Task 3 — `loto_cv_splits`: NOT STARTED
-Track 21 fixed held out; 3-fold leave-one-track-out CV generator over (8, 10, 14).
-Goes in `src/preprocessing.py`.
+## Task 2 — DONE 2026-07-15 (revised beyond the original spec above)
+First acceptance sweep with the plain `largest_true_run` rule above found a *third*
+failure mode not caught during design: a real band can internally **fragment** into
+several short runs (a few individually-rough rows inside an otherwise-real band — e.g.
+`21_05`, `8_10`), which `largest_true_run` alone either shrinks or invalidates. Fixed
+with two additional layers, both implemented in `src/preprocessing.py`:
+- `_smooth_row_density(mask, window)` — a sliding-window moving average of the raw
+  smoothness mask (`SEM_BAND_DENSITY_WINDOW = 21`), thresholded at
+  `SEM_BAND_DENSITY_THRESH = 0.5` before taking `largest_true_run`. Bridges small
+  internal gaps in a real band.
+- Density-threshold alone is foolable (scattered noise can nudge a windowed average
+  over 0.5 without ever being a real band — found on `10_02`, a genuine end-tile that
+  got a false-positive ~34-row "band"). Fixed with a second gate,
+  `SEM_BAND_MIN_PEAK_DENSITY = 0.9`: the candidate band must contain a peak density
+  near 1.0 (a genuinely solid smooth core) somewhere inside it, not just an averaged-up
+  cluster. Threshold chosen from real data — every confirmed real band peaks >= 0.952,
+  the worst noise false-positive peaks at 0.857, a clean gap.
 
-## Task 4 — `build_track_samples`: NOT STARTED
+Full investigation (roughness/density plots, the fragmentation and false-positive
+examples, the peak-density scatter used to pick 0.9) is in
+`notebooks/03_task2_sem_band_detection_investigation.ipynb`.
+
+**Final 53-tile sweep: 45/53 valid.** Invalid tiles: `8_01/02/03`, `10_01/02/03`,
+`14_01`, `21_01`. Tracks 14/21 lose only their true end-cap (matches the original
+expectation); tracks 8/10 lose their end-cap **plus 2 more tiles each** — checked, not a
+detection bug: those extra tiles' best candidate bands have peak density 0.52–0.71,
+clearly noise, not borderline. Reading: contrast dilution near the rounded end-cap
+extends ~3 tiles deep (~19mm) on tracks 8/10, vs. ~1 tile on 14/21 — a real per-track
+physical difference. All invalid tiles are handled by Task 4's neighbor-tile fallback.
+
+## Task 3 — `loto_cv_splits`: DONE 2026-07-15
+Implemented in `src/preprocessing.py`. `HELD_OUT_TEST_TRACK = 21`, `DEV_TRACKS = (8,
+10, 14)`. `loto_cv_splits()` yields `(train_tracks, val_track)` per fold: `((10,14),
+8)`, `((8,14), 10)`, `((8,10), 14)`. Verified output matches.
+
+## Task 4 — `build_track_samples`: implemented 2026-07-15, smoke-tested on track 8
 Assembles one track's full sample table: pairs each thermal frame's `T_{t-k:t+k}`
 window, the resolved (masked) SEM tile crop, and the Task-1 height-map target stats.
-**Now also owns the end-tile fallback**: when `detect_track_row_band` is invalid for a
-tile, borrow the band rows from the nearest valid neighboring tile of the same track.
+Implemented in `src/preprocessing.py`. Decisions made:
+- `k=5` (11 thermal frames, ≈2.2mm window) for the thermal input; frames at either end
+  of a track without a full window are dropped (~390 samples/track instead of ~400).
+- Target stats keep Task-1's narrower `window_mm=THERMAL_MM_PER_FRAME` (0.2mm, one
+  frame's width) — deliberately much narrower than the thermal input window, matching
+  the paper's `p(g_i(x) | T_{t-k:t+k}, S_i, x)`: wide context in, precise local target
+  out.
+- Samples store full arrays inline (thermal window stack, SEM top/bottom crops), not
+  just references — one row per sample, so the table is a list of dicts (SEM crop
+  shapes vary tile to tile, doesn't fit a fixed-dtype structured array like Task 1's).
+- **`Z_mm` is plane-detrended (`robust_plane_detrend`) before Task-1 stats are
+  computed.** Confirmed empirically (compared detrended vs. raw Task-1 output against
+  the already-recorded Task-1 smoke-test medians — detrended matches closely on all 4
+  tracks, e.g. track 8: raw gives 0.21mm median width, detrended gives 0.44mm, recorded
+  smoke test was 0.41mm) **and confirmed from provenance**: `robust_plane_detrend` is
+  official code (commit `d82b222`, the organizer upload), and the official starter
+  notebook detrends before *every* height-map plot it makes — never plots raw `Z_mm`.
+  Note: don't confuse this with `display_shear_grid` (also official) — that one is
+  explicitly commented "display-only... does not resample the height values," a purely
+  cosmetic plotting-grid shear, not a data correction; not used in our pipeline.
+  Track 8 turned out to have the *largest* cross-track tilt of all four tracks
+  (`slope_y = 0.0083`), despite not being in the notebook's `SELECTED_SLOPE_EFF` list
+  (which only tracked 10/14/21) — that list was incomplete for our purposes.
+- **Now owns the end-tile fallback**: `_resolve_sem_band(track_id, tile_index, ...)` —
+  when a tile's own `detect_track_row_band` is invalid, searches outward by tile-index
+  distance for the nearest same-track tile with a valid band and borrows its row range
+  (still crops the original tile's own image, just with borrowed row coordinates).
 
-## Task 5 — `scripts/build_processed_dataset.py`: NOT STARTED
-CLI that runs all 4 tracks, writes per-track sample tables + arrays into
-`processed_data/`, plus a provenance file (raw-file checksums, commit hash) per the
-`data_hash` invariant in `.CLAUDE.md`. Note: the Zenodo zips' md5s are available from
-the Zenodo API — candidate anchor for `data_hash`.
+**Smoke test, all 4 tracks (2026-07-15): DONE.**
 
-## Resume point
-1. **User writes `src/preprocessing.py`** per the Task-2 spec above.
-2. Claude runs the 53-tile acceptance sweep and reports against the criteria.
-3. Then: decide the Task-1 hardening caveat (near-zero widths), then Tasks 3–5 in order.
+| Track | samples | valid target stats | used SEM fallback |
+|-------|---------|---------------------|---------------------|
+| 8     | 390     | 375 (96.2%)         | 87                  |
+| 10    | 390     | 350 (89.7%)          | 87                  |
+| 14    | 390     | 363 (93.1%)          | 26                  |
+| 21    | 390     | 336 (86.2%)          | 24                  |
+
+Valid-target-stats rates track closely with Task 1's earlier overall NaN-fraction
+smoke test (8: 94.5%, 10: 87.8%, 14: 91.0%, 21: 84.2% valid windows) — consistent.
+Fallback counts scale with each track's known invalid-tile count (tracks 8/10 have 3
+invalid SEM tiles each -> ~87 borrowed samples; tracks 14/21 have 1 each -> ~24-26).
+
+## Task 5 — `scripts/build_processed_dataset.py`: DONE 2026-07-15
+CLI that runs all 4 tracks via `build_track_samples`, writes one
+`track_<id>_samples.pkl` per track to `processed_data/datasets/<run_tag>/`, plus
+`provenance.json` with `commit_hash`, `git_dirty`, and `data_hash` (md5 of each raw
+Zenodo zip in `data/`) — satisfies the `.CLAUDE.md` §3 data_hash invariant and §6
+provenance requirement. Warns to stderr and sets `git_dirty: true` if the working tree
+isn't clean (per §0, such a run is exploratory, not decision-grade).
+
+**Full run 2026-07-15 (exploratory — working tree was dirty):** all 4 tracks, 390
+samples each, valid counts matched the earlier per-track smoke tests exactly (8: 375,
+10: 350, 14: 363, 21: 336). Total output 11GB (thermal windows are `(11,400,400)`
+float32 ≈ 6.7MB/sample, dominates size — expected, per the "full arrays inline"
+storage-strategy decision in Task 4). Pickle round-trip verified.
+
+**All 5 preprocessing tasks now implemented.** Not yet done: a *clean* (non-dirty)
+decision-grade run once this code is committed; the Task-1 near-zero-width hardening
+caveat; the track-21 SEM-band-width open question (see Task 2).
+
+## Preprocessing: complete (2026-07-15)
+All 5 tasks implemented and smoke-tested on all 4 tracks. `scripts/build_processed_dataset.py`
+produced a full run (`processed_data/datasets/20260715_145326/`, ~11GB, one pickle per
+track + `provenance.json` with `commit_hash`/`data_hash`/`git_dirty`). That run was
+**exploratory** — working tree was dirty at the time — not decision-grade.
+
+Still-open items from preprocessing, not yet acted on: the Task-1 near-zero-width
+hardening caveat, and why track 21's SEM band heights run narrower in pixels than
+tracks 8/10/14 despite having the widest height-map track (see Task 2's sweep results
+above).
+
+## Phase 2: model training (started 2026-07-15)
+
+**Verified against the paper directly** (`paper/2607.07965v1.pdf` §5): Track-21-held-out
++ cross-track validation is the paper's own recommendation, and MAE on local width is
+explicitly listed as a candidate metric — our approach matches on both counts. The
+specific 3-fold leave-one-track-out mechanism (`loto_cv_splits`, Task 3) is our own
+reasonable implementation of "cross-track validation," not a literal paper requirement.
+Also cross-checked Table 2's NaN fractions against our own Task-1 smoke test — exact
+match, another independent confirmation the height-map loading/alignment is correct.
+
+**`.CLAUDE.md` §2/§4 protocol now followed strictly from this phase onward** (it was
+missed for Tasks 1-4 earlier in the session — the operating contract wasn't in context
+for that part of the conversation; caught mid-session via a direct grep of the file).
+
+Notebooks added (all in `notebooks/`, all auto-detect the repo root by searching
+upward for `pyproject.toml` — portable across machines, not just this Mac):
+- **05_baseline_pipeline_test.ipynb**: constant-baseline harness (`ConstantBaseline`
+  predicts the train-set target mean, no gradient descent) — validates the dataset
+  loading / CV-split routing / DataLoader batching / metric computation end to end,
+  independent of whether any real model can learn. All 3 CV folds ran cleanly.
+  Baseline val MAE per fold: `val=8: 0.2376mm, val=10: 0.1501mm, val=14: 0.2572mm`.
+- **06_cnn_full_training.ipynb**: first real (gradient-trained) model —
+  `SimpleCNN` (35,809 params, 3 strided conv layers + global avg pool + linear head),
+  treats the 11 thermal frames in `T_{t-k:t+k}` as input channels (not temporally
+  aware), predicts `width_mean_mm` only. Adam lr=1e-3, L1 loss, 20 epochs, batch 16.
+  SEM context and the other 4 target stats (boundary positions, edge roughness) are
+  **not yet used** by this model.
+
+**Full training results (3 folds x 20 epochs), reproduced independently by the user
+on their own run — numbers matched to 4 decimal places:**
+
+| fold | val_track | n_train | n_val | baseline val MAE | CNN best val MAE | best epoch | CNN final val MAE | improvement |
+|------|-----------|---------|-------|-------------------|-------------------|------------|---------------------|-------------|
+| 1 | 8  | 713 | 375 | 0.2376mm | 0.2187mm | 19 | 0.2227mm | 7.9% |
+| 2 | 10 | 738 | 350 | 0.1501mm | 0.1458mm | 10 | 0.1504mm | 2.8% |
+| 3 | 14 | 725 | 363 | 0.2572mm | 0.2463mm | 13 | 0.2529mm | 4.2% |
+
+Reading: CNN beats the baseline in all 3 folds (consistent direction, real signal) but
+by a modest margin (~5% average). `best_epoch` varies a lot per fold (19/10/13, no
+stable "sweet spot") and `final_val_mae` stays close to `best_val_mae` in every fold —
+val loss isn't diverging/overfitting by epoch 20, it's just plateauing early. This
+small thermal-only model has found a low ceiling, not a bug.
+
+**Speed** (this Mac, Apple MPS backend): ~100ms/batch, ~160 samples/sec, ~9.1s/epoch
+(45 batches, 713 train samples). Device selection checks CUDA first, then MPS, then
+CPU — same code should pick up CUDA automatically on a Linux GPU machine.
+
+**Linux/CUDA portability fixes made 2026-07-15** (after finding hardcoded
+`/Users/C.Y./nsf-fmrg-data-challenge` paths in the pre-existing notebooks 01/02):
+- All 6 notebooks: replaced the fragile `Path.cwd().name == 'notebooks'` heuristic with
+  a real upward search for `pyproject.toml` — robust to whatever directory a Jupyter
+  server was actually launched from (matters on a remote Linux box).
+- `uv.lock` already resolves proper Linux+CUDA wheels for torch (confirmed by
+  inspection — `nvidia-cudnn`, `nvidia-nccl`, `cuda-toolkit` etc. are pinned as
+  `sys_platform == 'linux'`-conditional dependencies), so `uv sync` on a Linux machine
+  needs no extra index/config.
+- Notebooks 05/06: `DataLoader` now gets `pin_memory=True, num_workers=4` when
+  `device.type == 'cuda'` (no-op elsewhere); notebook 06 also seeds
+  `torch.cuda.manual_seed_all(0)` alongside `torch.manual_seed(0)` for CUDA
+  reproducibility.
+- **Bug caught while doing this**: `ConstantBaseline().to(device)` followed by
+  `.fit()` would have silently reset the parameter back to CPU, since `.fit()` created
+  a fresh `torch.tensor(...)` with no device argument. Fixed by pinning it to
+  `self.value.device`. Re-ran notebook 05 end-to-end after the fix — identical results
+  to before the fix, confirming correctness on MPS; not yet run on an actual Linux CUDA
+  machine.
+
+## Resume point (updated 2026-07-15)
+1. **Open decision, not yet made**: where to push next on the CNN — options discussed
+   but not chosen: (a) bring in the SEM modality (built in Task 4, unused by the model
+   so far), (b) give the thermal input real temporal structure instead of stacking 11
+   frames as plain channels, (c) just tune training (more epochs, LR schedule) on the
+   current thermal-only setup to see if the ~5% ceiling moves. User was heading out to
+   review progress and decide next time.
+2. `notebooks/06_cnn_full_training.ipynb` is a **clean, unexecuted** notebook (source
+   only, no baked outputs) — intended to be run by the user themselves, possibly on a
+   different (Linux/CUDA) machine, to watch it train live.
+3. Nothing has been committed this session — working tree is still dirty. A clean,
+   decision-grade training run (per `.CLAUDE.md` §0) would need a commit first.
