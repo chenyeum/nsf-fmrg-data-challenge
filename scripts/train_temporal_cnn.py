@@ -125,7 +125,10 @@ def train_one_fold(fold_i, train_tracks, val_track, run_dir, args, device):
     baseline_val_mae = mae_mm(val_ds.targets(),
                               np.full(len(val_ds), train_ds.targets().mean()))
 
-    loader_kwargs = dict(pin_memory=True, num_workers=4) if device.type == 'cuda' else dict()
+    # num_workers=0: worker forks copy the in-RAM dataset (~8GB/fold) via
+    # refcount-triggered COW and OOM a 15GB machine; loading is not the
+    # bottleneck anyway since rows are already in memory and compute is GPU-bound
+    loader_kwargs = dict(pin_memory=True) if device.type == 'cuda' else dict()
     generator = torch.Generator()
     generator.manual_seed(args.seed + fold_i)
     train_loader = DataLoader(train_ds, batch_size=args.batch_size, shuffle=True,
