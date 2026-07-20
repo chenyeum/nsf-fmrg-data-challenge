@@ -301,15 +301,359 @@ CPU — same code should pick up CUDA automatically on a Linux GPU machine.
   to before the fix, confirming correctness on MPS; not yet run on an actual Linux CUDA
   machine.
 
-## Resume point (updated 2026-07-15)
-1. **Open decision, not yet made**: where to push next on the CNN — options discussed
-   but not chosen: (a) bring in the SEM modality (built in Task 4, unused by the model
-   so far), (b) give the thermal input real temporal structure instead of stacking 11
-   frames as plain channels, (c) just tune training (more epochs, LR schedule) on the
-   current thermal-only setup to see if the ~5% ceiling moves. User was heading out to
-   review progress and decide next time.
-2. `notebooks/06_cnn_full_training.ipynb` is a **clean, unexecuted** notebook (source
-   only, no baked outputs) — intended to be run by the user themselves, possibly on a
-   different (Linux/CUDA) machine, to watch it train live.
-3. Nothing has been committed this session — working tree is still dirty. A clean,
-   decision-grade training run (per `.CLAUDE.md` §0) would need a commit first.
+## Phase 2 — architecture comparison (2026-07-16): DONE, architecture is NOT the bottleneck
+
+The open (a)/(b)/(c) decision above was resolved by testing (b) directly. Built and
+committed (`7241303`):
+- `src/temporal_cnn.py` — Step-2 factorized model: one small 2D `FrameEncoder`
+  (4x stride-2 conv blocks, GroupNorm, ~60k params) weight-shared across the 11
+  thermal frames, then a **swappable temporal module** over the 11 embeddings:
+  `mean` (order-free control, 60.6k total) / `conv` (2x Conv1d over time, 85.3k) /
+  `bilstm` (bidirectional LSTM, 85.7k). Head already sized for a future 5-target
+  multi-task variant. Also now the canonical home of `mae_mm` (§3 single metric
+  implementation — notebook 06 still carries an inline copy, migrate when touched).
+- `scripts/train_temporal_cnn.py` — 3-fold LOTO CV harness: normalization fit on
+  train tracks only (§3), runtime assert Track 21 never enters a fold, in-fold
+  constant baseline, AdamW + cosine LR + early stopping (patience 15), CUDA
+  determinism settings, writes `processed_data/model_runs/<tag>/results.json` with
+  pinned `{config_hash, commit_hash, data_hash}` (§6).
+- Notebooks 04 (pipeline walkthrough) and 05 (baseline) deleted — superseded by
+  `build_processed_dataset.py` and the in-script baseline. 03 kept as the SEM-band
+  research record; 06 kept as the SimpleCNN reference implementation.
+
+**Results, all on dataset run `20260715_232715`, this Linux box (RTX 5060), best
+val MAE per fold in mm:**
+
+| fold (val) | baseline | SimpleCNN | mean | bilstm | conv |
+|-----------|----------|-----------|--------|--------|--------|
+| 1 (8)  | 0.2376 | 0.2187 | 0.2188 | 0.2195 | 0.2183 |
+| 2 (10) | 0.1501 | 0.1458 | 0.1446 | 0.1446 | 0.1459 |
+| 3 (14) | 0.2572 | 0.2463 | 0.2467 | 0.2497 | 0.2500 |
+| **mean** | 0.2150 | 0.2036 | **0.2034** | 0.2046 | 0.2047 |
+
+- `mean`/`bilstm` runs are **decision-grade** (clean tree at `7241303`), in
+  `model_runs/20260716_001751_mean` and `20260716_002846_bilstm`.
+- `conv` first attempt was **killed by the Linux OOM killer** (fold-1 epoch 6):
+  `DataLoader(num_workers=4)` worker forks turn the ~8GB in-RAM dataset into real
+  copies via refcount-triggered COW on this 15GB machine. Fixed with
+  `num_workers=0` (loading isn't the bottleneck; rows are already in RAM and the
+  workload is GPU-bound). The rerun (`model_runs/20260716_004754_conv`) completed
+  clean but is formally **exploratory** — tree was dirty with the uncommitted
+  one-liner. Seeded, so a post-commit rerun reproduces exactly.
+
+**Reading (the important part):** four architectures — channel-stacked SimpleCNN,
+order-free mean-pool, temporal conv, BiLSTM — all land on the same ~0.204mm plateau
+within ±0.001mm. Order-aware models do NOT beat the order-free control, so temporal
+structure is not where the missing signal is. The ceiling is in the data, not the
+architecture. Corroborating detail: `mean`/`bilstm` hit best val at epochs 1–5;
+`conv` trains more gradually (best at 22/11/13) but reaches the same endpoint.
+
+## Plan for future (ordered by expected value; decided 2026-07-16)
+
+> **Superseded same day** — Step 0 escalated into a full target redefinition and
+> Step 4 was executed as a GP (not boosted trees); Step 5 was redesigned. See the
+> two sections below. The skips (item 6) were re-confirmed empirically.
+
+1. **Commit the `num_workers=0` one-liner** (only dirty change) so the conv run can
+   be reproduced decision-grade.
+2. **Step 0 — harden Task-1 targets. Now the top priority, and it blocks everything
+   else.** The near-zero-width caveat (single noise pixel passing the MAD gate →
+   width ~0.001mm in a ~0.4mm-median track) is label noise that puts a floor under
+   val MAE larger than the differences we're trying to measure. Fix = minimum
+   connected-run length per column in `_column_track_boundary` (flagged since Task 1).
+   Core-chain change: §2/§4 probe + full dataset rebuild + rerun of at least the
+   constant baseline and one model variant to re-anchor the numbers.
+3. **Step 4 — gradient-boosted trees on hand-crafted melt-pool features** (max temp,
+   area above threshold, centroid, elongation per frame x 11 ≈ ~50 features).
+   Strong small-data baseline, seconds to train, and diagnostic: if it matches the
+   CNNs' plateau, the extractable thermal signal is mostly pool statistics — which
+   reframes all remaining model effort.
+4. **Step 3 — multi-task head** (predict all 5 Task-1 stats, report width MAE only):
+   cheap regularization test, the `TemporalCNN` head already supports `n_targets=5`.
+5. **Step 5 — SEM branch, last, low expectations:** only ~13 distinct tiles/track
+   (~26 distinct images in a 2-track fold) → an encoder will likely memorize
+   per-tile offsets. Helps-in-train-but-not-LOTO = memorization signature.
+6. **Skip:** more thermal-only architecture variants (settled by the comparison
+   above), big pretrained backbones, 3D conv / transformers at this data size.
+
+## Task-1 target redefinition (2026-07-16 afternoon): NaN-valley labels
+
+Step 0 escalated. Investigating the 8-vs-10 median flip showed the **old width
+target measured texture noise**: the track height signal (+4–8 µm) is ~15× below
+the Wyko noise floor (per-column MAD 43–115 µm), so any below-median-depression
+extraction returns noise. User-approved fix (root-cause, not patch):
+
+- **New definition** (`src/preprocessing.py`, `_nan_valley_band`): the track is the
+  **low-NaN valley** (4–15% NaN density) between rough high-NaN shoulders (60–85%).
+  Per-row NaN density → coverage-normalized moving average (`VALLEY_SMOOTH_PX=25`)
+  → shoulder level = median of outer quarters, floor = central minimum → require
+  valley contrast ≥ `VALLEY_MIN_CONTRAST=0.25` (else invalid) → width = contiguous
+  below-half-threshold run containing the floor. `width_std`/`edge_roughness` from
+  `VALLEY_N_SUBBLOCKS=5` column sub-blocks; validity = valley detection succeeds
+  (nan_frac recorded but no longer a gate). Old `_column_track_boundary` deleted.
+- **Acceptance sweep v2** (`scripts/step0_acceptance_sweep.py`) all green:
+  nan_frac byte-identical to old code, per-track medians 1.00/0.81/0.68/0.45 mm
+  (ordering 8>10>14>21 now correct), width/SEM-band ratios 0.94–1.20, valid counts
+  383/363/374/358 (+8/+13/+11/+22), deterministic.
+- **5 residual narrow windows**: 3 weak-contrast marginal (t10 x=26.5/26.7/98.3),
+  2 plausible early-scan transients (t8 x=22.3, t14 x=24.3). Decision pending:
+  accept vs raise `VALLEY_MIN_CONTRAST` to ~0.45 (needs revalidation).
+- New dataset build: `processed_data/datasets/20260716_151021` (exploratory).
+
+## Phase 3 — probabilistic GP modeling on new labels (2026-07-16): the power law IS the model
+
+All on dataset `20260716_151021`, all runs seeded + determinism-verified
+(two runs → identical metrics.json), all **exploratory** (dirty tree).
+
+- `src/thermal_features.py`: 18 hand melt-pool features (fixed thresholds
+  1500/1800/2100, peak, mean-above-pool, bbox aspect, centroid offsets, tail
+  length; mean+std over 11 frames) + `x_mm`; feature cache npz; track-21 blocked
+  at loader level. `nan_frac`/`n_cols_used` deliberately excluded (leakage).
+- **GP anchor** (`scripts/run_gp_baseline.py` → `results/gp_baseline/20260716_151021`):
+  ARD-RBF + White kernel, heteroscedastic per-sample alpha, train-only
+  standardization. Pooled MAE 0.2066 vs constant 0.2043 vs interp 0.2097 — the GP
+  does **not** beat the constant baseline. Fold 2 (val 10 = interpolation) is well
+  calibrated (cov90 0.94); folds 1/3 (extrapolation) collapse to the train mean
+  and are overconfident (cov90 0.04/0.80). ARD length scales show x_mm
+  memorization. Runtime 9:17.
+- **A-phys** (`scripts/run_gp_physmean.py` → `results/gp_physmean/20260716_151021`):
+  two-stage m(P)=a·P^b (weighted curve_fit, b∈[0.1,6]) + residual GP (anchor
+  config minus x_mm). Power map **reversed vs task spec**, inferred from data
+  {8:400, 10:350, 14:300, 21:200} W — inferred 2026-07-16, then
+  ORGANIZER-CONFIRMED 2026-07-17 (a known participant confusion point; our
+  data-driven inference preceded the confirmation — report material).
+  Pooled MAE: anchor 0.2066 / **phys_only 0.1384** / phys_gp 0.1419 /
+  phys_gp_xmm 0.1425. phys_gp cov90 0.71 pooled (fold1 0.51, fold3 0.85).
+  Runtime 23:54 (over the 15-min budget; recorded). **Reading: the power trend
+  carries all transferable signal; thermal features add ≈0 (slightly negative on
+  extrapolation folds); x_mm adds nothing once the trend is explicit.**
+  Per-fold b swings 0.65–2.07 (2 power points → exactly identified: trend anchor,
+  not a validated law).
+- **Within-track correlation screen**: all 18 features have |r| ≤ 0.2 vs width
+  inside each track, no cross-track sign-consistent signal; within-track width std
+  0.09–0.14 mm ≈ label noise. **Kills CNN-on-residuals, transformer, ResNet
+  transfer as width predictors** — there is no within-track signal to learn.
+  (Optional closure experiment if ever needed: frozen resnet18 embeddings +
+  ridge probe on residuals, expected negative.)
+- **Calibration dead end**: delta-method sd of m(P_val) from curve_fit pcov is
+  0.0006–0.013 mm vs actual extrapolation bias 0.13–0.17 mm — parameter
+  uncertainty is invisible next to model-form error, which 2 power points cannot
+  estimate. Only honest fix identified: cross-fold empirical variance inflation
+  (fold k inflated by the other folds' m-bias RMS). User decision pending.
+- **3-track fit (final-model configuration)**: b=1.416, per-power residuals
+  ≤ 0.023 mm (power-law shape actually holds across 300–400 W with 1 dof);
+  extrapolated m(200 W)=0.3705 mm vs track-21 SEM band 0.379 mm (**−2.2%**) —
+  independent external validation of the reversed power map and the final model.
+- **README scope check** (user asked "is power-only too simple?"): the challenge
+  is *probabilistic* local geometric variation from *multimodal* data; SEM is
+  explicitly invited as a substrate-morphology **input** (track region masked).
+  Old Step 5 redesigned: not an SEM encoder branch — extract substrate roughness
+  features along x from SEM tiles, run the same within-track correlation screen,
+  and only wire into the residual GP if signal exists. Richer targets
+  (edge roughness, boundary positions) are cheap extensions already computed by
+  preprocessing.
+
+## Phase 3 closure experiments (2026-07-17): SEM negative, variance inflation works
+
+Both run on dataset `20260716_151021`, exploratory (dirty tree),
+determinism-verified.
+
+- **SEM substrate screen** (`scripts/sem_substrate_screen.py`): tile-level
+  (n≈13/track — within-tile column-to-x orientation never validated, so no
+  sub-tile alignment assumed) substrate roughness/intensity features from the
+  Task-2 anti-leakage crops, vs per-tile median width, within track. 38/39
+  tiles usable (7 borrowed bands). **Negative across the board**: no feature
+  sign-consistent across the 3 dev tracks (best single-track |r|=0.43 at n=13
+  flips sign on the other tracks); pooled demeaned |r| ≤ 0.14, p ≥ 0.42.
+  **Evidence chain closed: within-track width fluctuation is explained by
+  neither process signal (thermal) nor substrate state (SEM) — it is
+  measurement noise. SEM does not enter the residual GP; the README's
+  SEM-as-input invitation was tested and declined on evidence.**
+- **SEM screen v2, strip-level with official alignment**
+  (`scripts/sem_substrate_screen_aligned.py`, 2026-07-17 evening): organizers'
+  alignment rule (user-relayed): stitch tiles 01..N via real overlaps (~5%),
+  no per-tile flip, then fliplr the whole mosaic → left-to-right = 20→100 mm,
+  tile N at 20 mm. Implemented with per-pair cross-correlation overlap
+  estimation (fallback to nominal 51 px when match corr < 0.3 — many pairs
+  are weak, so sub-tile alignment carries ~±0.3 mm uncertainty), per-tile
+  band detection medianed for the mosaic. 0.5 mm strips at every valid width
+  window (n=1120 pooled). **Still negative**: no sign-consistent feature,
+  pooled demeaned |r| ≤ 0.05, p ≥ 0.083. The tile-level negative was not an
+  alignment artifact; SEM stays closed as an input.
+- **Cross-fold variance inflation** (`scripts/run_gp_calib_inflation.py` →
+  `results/gp_calib_inflation/20260716_151021`): fold k's predictive variance
+  inflated by the other folds' mean squared stage-1 bias (sigma_new =
+  sqrt(sigma² + v_k), points untouched). Refit reproduced A-phys stage-1
+  biases exactly (−0.170/+0.029/−0.129 mm). Results: pooled cov90 0.71→0.95
+  (fold1 0.51→0.91), NLL better on every fold (pooled −0.116→−0.349), CRPS
+  0.0993→0.0958 — a genuine calibration improvement, not just wider bars.
+  **cov50 stays low (pooled 0.35, fold1 0.03)**: inflation widens but cannot
+  re-center; the center offset is power-law model-form error, unfixable with
+  3 power levels — goes in the report as a stated limitation. Honesty note in
+  provenance: within LOTO the inflation has unavoidable train/val overlap;
+  for the track-21 submission the rule is fully clean (dev-fold biases only,
+  track-21 labels never involved).
+
+## Phase 4 (2026-07-17): CVAE probe → melt-pool LINEAR model becomes primary
+
+User-requested CVAE (`scripts/run_cvae.py`, 112k params: FrameEncoder+GRU
+thermal branch, shallow CNN on SEM crops, continuous standardized log(P)
+condition — NOT nn.Embedding, cold-start; target = width scalar, not height
+map — noise floor; beta-VAE loss). Results (`results/cvae/`): pooled MAE
+0.1425 ≈ phys_gp but wildly unstable folds (0.209/0.153/0.064), calibration
+unusable (fold2 NLL 34, best epoch 0). NOT for submission.
+
+**But the fold-3 anomaly (MAE 0.064 ≈ noise floor on an extrapolation fold)
+exposed a wrong earlier conclusion**: thermal features DO carry between-track
+level signal (melt-pool area/peak/tail are monotone 8>10>14>21, t21 lowest —
+yet another independent confirmation of the reversed power map). The anchor
+RBF-GP couldn't use it because **RBF extrapolation reverts to the train
+mean** — a kernel-structure limitation, not absent signal. The within-track
+= 0 conclusion still stands; only the between-track half is revised.
+
+`scripts/run_linear_baseline.py` (BayesianRidge, determinism-verified,
+`results/linear_baseline/`): three variants + label-free t21 external check
+(predict every t21 window from THERMAL INPUTS ONLY — user-sanctioned direct
+pkl read, labels never touched — compare median vs SEM band 0.379 mm):
+
+| variant | LOTO MAE | cov90+infl | t21 med | /SEM (dev 0.94–1.20) |
+|---------|----------|-----------|---------|----------------------|
+| *linear3 (sqrt(area), peak, tail) | **0.1189** | 0.92 | 0.456 | 1.20 borderline |
+| area1d (raw area_1500) | 0.1354 | 0.97 | 0.393 | 1.04 pass |
+| full18 (negative control) | 0.1374 | 0.98 | 1.154 | **3.04 FAIL** |
+
+full18's failure is the lesson: collinear mixed-sign coefficients explode
+under far extrapolation (t21 area_2100 is 27x out of range); LOTO cannot see
+it because dev folds extrapolate mildly. Physics-constrained low-dim
+features fix it. Selection honesty: 5 feature sets screened post-hoc against
+LOTO + SEM check (noted in provenance and to be stated in the report).
+Primary t21 per-window predictions saved to
+`results/linear_baseline/<run>/t21_predictions_primary.npz`.
+
+## Evaluation criteria (organizer clarification, user-relayed 2026-07-17)
+
+Final ranking = QUANTITATIVE evaluation against the measured track-21 height
+map (report/presentation assess justification, reproducibility,
+interpretation, novelty — but do not replace the numbers). Minimum output:
+local width w(x) = y_upper(x) − y_lower(x) as a SPATIAL sequence along the
+scan direction (not a time series); boundary functions / centerline /
+waviness are optional richer outputs. Scored on: (1) error vs measured local
+width or boundaries; (2) fidelity of spatial variations along the track;
+(3) overall geometry agreement; (4) calibration and usefulness of predicted
+uncertainty (probabilistic models).
+
+Power mapping ORGANIZER-CONFIRMED 2026-07-17: 400 W→8, 350 W→10, 300 W→14,
+200 W→21 (a known participant confusion; matches our 2026-07-16 inference).
+
+Same-evening strategy probes (exploratory):
+- Within-track width variance is 80–90% high-frequency (5 mm smoothing keeps
+  9–18%); smoothed feature-width correlations stay weak/inconsistent →
+  criterion (2) ceiling is low; submit the SMOOTH component, do not emit
+  uncorrelated per-window wiggles (smoothing predictions along x should
+  improve error — verify in LOTO).
+- One real, sign-consistent spatial structure: width drifts UP along scan on
+  all three dev tracks (r(x, 5mm-smoothed width) = +0.42/+0.10/+0.34, thermal
+  buildup signature) → test adding a linear x term to linear3 in LOTO.
+- Centerline drifts 0.4–0.8 mm, smooth and strongly x-correlated per track
+  but with per-track random sign (+0.71 vs −0.77) and an unknowable
+  registration constant for t21 → boundary output needs the organizers'
+  registration convention first; w(x) is the safe minimum deliverable.
+- Open questions sent to organizers (pending): ground-truth extraction
+  method + sampling Δx; metric for criterion (2); boundary registration
+  convention; uncertainty submission format.
+
+## Session 2026-07-18: code review + shift toward report writing
+
+**Code review (user, line-by-line, one section at a time)**: fully reviewed
+`src/thermal_features.py` and `scripts/run_linear_baseline.py`. No
+correctness issues found. Two minor non-blocking notes surfaced:
+- `frame_features()`'s no-pool-pixels branch zero-fills 5 features; possible
+  edge case on t21's weakest frames (200 W, median area_1500 = 945, lowest of
+  all tracks). Empirical check on cached dev features found **zero**
+  anomalous rows (99th-pct std_peak = 202, no row > 2x that) — the same class
+  of risk, checked, and clean on dev data. Optional follow-up: log the
+  t21-else-branch trigger count in `predict_track21.py` as a diagnostic
+  (cheap, non-blocking, not yet done).
+- No connected-component filtering on pool/area pixels and `peak` uses raw
+  `frame.max()` (both spatter-sensitive in principle) — accepted as
+  documented simplifications, not changed (would require a full rerun for
+  unverified benefit).
+- Confirmed end-to-end: track-21 access in `t21_input_features()` reads only
+  `thermal_window`/`x_mm`/`frame_index` from the raw pickle — no width/valid
+  columns touched anywhere in that function.
+
+**Literature check (web search, melt-pool thermal imaging + DED/LPBF ML)**:
+ROI-cropping + CNN/ViT is the field's standard approach, but those studies
+train across many process-parameter combinations and interpolate; our
+3-power-level setup is pure extrapolation, where the linear feature route
+wins regardless of architecture. Also: our threshold-blob feature extraction
+(`frame_features`) is already an aggressive form of ROI reduction (176万
+pixels → a handful of physical scalars), just without a trailing CNN —
+folded into the "why not raw-pixel deep learning" report narrative.
+
+**"Wave smoothing" discussion**: user's collaborator observed linear3's
+output is nearly flat, smoothing over real-looking width waviness. Confirmed
+this is expected given within-track signal = 0. Three lightweight, not-yet-run
+diagnostics proposed to upgrade "measurement noise" from inference to
+evidence (candidates for report figures, low cost, no model training):
+1. Compare `width_std_mm` (within-window profilometer column spread) against
+   within-track wave amplitude — if same order, wave ≈ repeat-measurement
+   noise.
+2. Lag-1 spatial autocorrelation of width residuals after removing per-track
+   mean + x-trend — near-zero → white noise, confirms non-predictable.
+3. Cross-instrument check: correlate demeaned SEM-band width wiggle against
+   demeaned height-map width wiggle per dev track (SEM band read for
+   diagnostics only, never as model input — output-leakage rule still
+   applies to model inputs, not to noise-characterization analysis). Diluted
+   by ±0.3 mm SEM/height-map alignment uncertainty, so a null result here is
+   weak evidence, a positive correlation would be strong evidence.
+
+**Strategic decision (user, 2026-07-18)**: linear3 is considered likely
+near-final; further feature engineering is de-prioritized except the
+already-queued x-trend LOTO test. Rationale agreed: within-track feature
+engineering has been exhausted across two independent modalities (18 thermal
+features + 2 rounds of SEM) with zero signal both times; MAE 0.1189 mm is
+already at the within-track noise floor (0.09–0.14 mm); the generalization
+axis has only 3 points, so new engineered features can't be validated beyond
+curve-fitting 3 dev tracks. **Effort shifts to report writing next week** —
+user emphasized report quality matters more than usual for this competition
+specifically because there is no strict/precise ground truth (organizer
+criteria explicitly weight justification/reproducibility/novelty alongside
+the quantitative width-error number).
+
+## Resume point (updated 2026-07-18)
+1. **Tree dirty with two+ days' work**: `src/preprocessing.py` NaN-valley
+   rewrite, `scripts/step0_acceptance_sweep.py`, `src/thermal_features.py`,
+   `scripts/run_gp_baseline.py`, `scripts/run_gp_physmean.py`,
+   `scripts/run_gp_calib_inflation.py`, `scripts/sem_substrate_screen.py`,
+   `scripts/sem_substrate_screen_aligned.py` (official-alignment v2),
+   `scripts/run_cvae.py`, `scripts/run_linear_baseline.py`, this plan update,
+   `pyproject.toml`/`uv.lock` (scikit-learn), `results/`. Everything is
+   exploratory until user reviews + commits; all runs are seeded and
+   determinism-verified (CVAE: single seed, not re-verified — GPU run).
+2. **Final track-21 recipe (user-approved 2026-07-17)**:
+   PRIMARY = linear3 melt-pool BayesianRidge + cross-fold variance inflation
+   (no power mapping dependency); CORROBORATION = phys_gp + inflation
+   (independent evidence route via power law; both routes put t21 at
+   0.37–0.46 mm). CVAE goes in the report as the discovery trigger + deep
+   negative control, not in the submission.
+3. **Review status (2026-07-18)**: `thermal_features.py` and
+   `run_linear_baseline.py` fully reviewed, no blocking issues. Still to
+   review by the user: `run_gp_physmean.py`, `run_gp_calib_inflation.py`,
+   `sem_substrate_screen.py` / `_aligned.py`, `run_cvae.py`,
+   `step0_acceptance_sweep.py`, `preprocessing.py` diff. Continuing
+   2026-07-19, `run_gp_calib_inflation.py` next.
+4. **Open user decision**: the 5 marginal narrow windows (accept vs raise
+   `VALLEY_MIN_CONTRAST` to ~0.45 + revalidate).
+5. **Remaining build**: `scripts/predict_track21.py` assembling the primary +
+   corroboration outputs into the submission format (t21 per-window
+   predictions already cached for the primary).
+6. **De-prioritized**: further feature engineering (see 2026-07-18 decision
+   above) — only the x-trend LOTO test remains queued; the 3 noise-vs-signal
+   diagnostics above are optional report-figure material, not required.
+7. **Report writing targeted for next week** — user flagged this as
+   unusually high-value for this competition given the lack of strict
+   ground truth; start drafting once review + commit + marginal-window
+   decision are settled.
+8. Machine note: this 15GB-RAM box cannot afford DataLoader worker forks with
+   the in-RAM dataset — keep `num_workers=0` in any future training script.

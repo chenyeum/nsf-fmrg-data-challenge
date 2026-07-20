@@ -1,0 +1,7 @@
+{
+  "commit": "ce69750c7f28f0b2b481dc57b32a111555ad9d1d",
+  "config_hash": "86df141bb665aabf7a0c7aac8187a624",
+  "dataset_run": "20260716_151021",
+  "dirty": true,
+  "honesty_note": "LOTO evaluation of the inflation has unavoidable overlap: fold j fits include fold k's val track in training. The rule is fully clean for the track-21 submission (uses only dev-track biases)."
+}

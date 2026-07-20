@@ -1,0 +1,48 @@
+{
+  "commit_hash": "ce69750c7f28f0b2b481dc57b32a111555ad9d1d",
+  "config": {
+    "alpha": "per-sample (width_std/sqrt(n_cols))^2 standardized, floor 1e-6",
+    "dataset_run": "20260716_151021",
+    "features": [
+      "mean_area_1500",
+      "mean_area_1800",
+      "mean_area_2100",
+      "mean_peak",
+      "mean_mean_above_pool",
+      "mean_bbox_aspect",
+      "mean_centroid_dx",
+      "mean_centroid_dy",
+      "mean_tail_len",
+      "std_area_1500",
+      "std_area_1800",
+      "std_area_2100",
+      "std_peak",
+      "std_mean_above_pool",
+      "std_bbox_aspect",
+      "std_centroid_dx",
+      "std_centroid_dy",
+      "std_tail_len",
+      "x_mm"
+    ],
+    "kernel": "C*RBF(ARD)+White",
+    "model": "GaussianProcessRegressor",
+    "n_restarts_optimizer": 5,
+    "seed": 0,
+    "train_subsampled": false,
+    "x_range_alt": [
+      29.0,
+      99.0
+    ]
+  },
+  "config_hash": "61d6b4c91d47eec43204438d13a94cc9",
+  "dataset_run": "20260716_151021",
+  "feature_file": "processed_data/features/20260716_151021_thermal_v1.npz",
+  "feature_file_md5": "b5cca17d269070cab60388ca072783a2",
+  "fitted_kernels": [
+    "0.792**2 * RBF(length_scale=[0.521, 23.3, 55.8, 1e+03, 1e+03, 456, 1e+03, 1e+03, 1e+03, 881, 1e+03, 1e+03, 1e+03, 1e+03, 0.0981, 1e+03, 1e+03, 1e+03, 0.0189]) + WhiteKernel(noise_level=0.37)",
+    "0.819**2 * RBF(length_scale=[1e+03, 54.7, 56.4, 0.37, 353, 684, 0.628, 1e+03, 443, 937, 1e+03, 12.4, 422, 2.41, 606, 6.71, 1e+03, 405, 0.375]) + WhiteKernel(noise_level=0.139)",
+    "0.887**2 * RBF(length_scale=[566, 0.55, 1e+03, 71.4, 2.38, 1e+03, 1e+03, 19.2, 824, 902, 1e+03, 1e+03, 1e+03, 1e+03, 1e+03, 1e+03, 1e+03, 2.35, 0.0294]) + WhiteKernel(noise_level=0.197)"
+  ],
+  "git_dirty": true,
+  "seed": 0
+}

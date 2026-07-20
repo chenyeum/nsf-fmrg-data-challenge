@@ -1,0 +1,24 @@
+{
+  "commit": "ce69750c7f28f0b2b481dc57b32a111555ad9d1d",
+  "config": {
+    "excluded": [
+      "x_mm",
+      "nan_frac",
+      "n_cols_used"
+    ],
+    "inflation_rule": "v_k = mean of other folds median-bias^2",
+    "model": "BayesianRidge",
+    "primary": "linear3",
+    "seed": 0,
+    "variants": {
+      "area1d": "see module docstring",
+      "full18": "see module docstring",
+      "linear3": "see module docstring"
+    }
+  },
+  "config_hash": "5ae9439dc81ff62a2726b4f31481783d",
+  "dataset_run": "20260716_151021",
+  "dirty": true,
+  "selection_note": "five feature sets screened post-hoc 2026-07-17 on LOTO MAE + label-free SEM check; physics-constrained but post-hoc \u2014 stated in the report",
+  "t21_access_note": "track_21_samples.pkl read directly, bypassing the guarded loader: USER-SANCTIONED 2026-07-17, input side only (thermal_window/x_mm/frame_index); width/validity columns never read."
+}

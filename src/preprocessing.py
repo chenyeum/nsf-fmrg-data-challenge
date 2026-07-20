@@ -28,90 +28,120 @@ _WIDTH_STATS_DTYPE = [
 ]
 
 
-def _column_track_boundary(col, y_mm, mad_k=3.0, min_valid_points=5):
-    finite = np.isfinite(col)
-    if finite.sum() < min_valid_points:
-        return None, None, False
+# Track signature in the height maps is NaN structure, not height deviation:
+# the re-solidified track is smooth and measurable (low NaN density) while the
+# surrounding rough substrate/spatter defeats white-light profilometry (60-85%
+# NaN). The track's height signal (+4-8um) sits ~15x below the field's noise
+# amplitude, so height-threshold extraction measures texture noise. Validated
+# against SEM band widths and laser-power monotonicity (8>10>14>21); see
+# PREPROCESSING_PLAN.md Step 0.
+VALLEY_SMOOTH_PX = 25
+VALLEY_REL_THRESH = 0.5
+VALLEY_MIN_CONTRAST = 0.25
+VALLEY_MIN_COLS = 10
+VALLEY_N_SUBBLOCKS = 5
 
-    med = np.median(col[finite])
-    mad = 1.4826 * np.median(np.abs(col[finite] - med))
-    thr = mad_k * max(mad, 1e-9)
+_INVALID_STATS = {
+    'width_mean_mm': np.nan, 'width_std_mm': np.nan,
+    'boundary_left_mean_mm': np.nan, 'boundary_right_mean_mm': np.nan,
+    'edge_roughness_mm': np.nan, 'n_cols_used': 0,
+}
 
-    deviation = med - col
-    mask = deviation > thr
 
-    if not mask.any():
-        return None, None, False
+def _nan_valley_band(block, y_mm, smooth_px=VALLEY_SMOOTH_PX,
+                     rel=VALLEY_REL_THRESH, min_contrast=VALLEY_MIN_CONTRAST):
+    """Locate the low-NaN valley (the track) in a height-map block.
 
-    track_y = y_mm[mask]
-    left, right = float(track_y.min()), float(track_y.max())
-    return left, right, True
+    Returns (left_mm, right_mm) of the contiguous below-threshold row run
+    containing the density minimum, or None when shoulder-to-floor contrast
+    is too weak to trust a detection.
+    """
+    density = np.isnan(block).mean(axis=1)
+    kernel = np.ones(smooth_px)
+    smoothed = np.convolve(density, kernel, 'same') / np.convolve(
+        np.ones_like(density), kernel, 'same')
+
+    quarter = len(smoothed) // 4
+    shoulder = float(np.median(np.concatenate([smoothed[:quarter], smoothed[-quarter:]])))
+    central = smoothed[quarter:-quarter]
+    floor_idx = quarter + int(np.argmin(central))
+    floor = float(smoothed[floor_idx])
+    if shoulder - floor < min_contrast:
+        return None
+
+    below = np.flatnonzero(smoothed < floor + rel * (shoulder - floor))
+    runs = np.split(below, np.flatnonzero(np.diff(below) > 1) + 1)
+    for run in runs:
+        if run[0] <= floor_idx <= run[-1]:
+            return float(y_mm[run[0]]), float(y_mm[run[-1]])
+    return None
 
 
 def local_width_stats_at_window(Z_mm, x_mm, y_mm, x_center_mm, window_mm,
-                                 nan_frac_max=0.6, min_valid_cols=5, mad_k=3.0):
+                                 smooth_px=VALLEY_SMOOTH_PX,
+                                 rel=VALLEY_REL_THRESH,
+                                 min_contrast=VALLEY_MIN_CONTRAST):
     # 1. locate columns whose physical x falls inside this window
     col_mask = (x_mm >= x_center_mm - window_mm / 2) & (x_mm <= x_center_mm + window_mm / 2)
     col_indices = np.flatnonzero(col_mask)
 
-    # 2. window falls outside the height map's covered x range
-    if col_indices.size == 0:
+    # 2. window outside the covered x range, or too few columns for a
+    #    trustworthy row-density profile
+    if col_indices.size < VALLEY_MIN_COLS:
         return {'x_mm': x_center_mm, 'valid': False, 'nan_frac': 1.0,
-                'width_mean_mm': np.nan, 'width_std_mm': np.nan,
-                'boundary_left_mean_mm': np.nan, 'boundary_right_mean_mm': np.nan,
-                'edge_roughness_mm': np.nan, 'n_cols_used': 0}
+                **_INVALID_STATS}
 
-    # 3. first gate: overall NaN fraction across the selected block
+    # nan_frac is recorded for provenance/analysis but is no longer a validity
+    # gate: high NaN in the shoulders is the track's signature, not a defect.
     block = Z_mm[:, col_indices]
     nan_frac = float(np.isnan(block).sum() / block.size)
-    if nan_frac > nan_frac_max:
+
+    # 3. validity gate = valley detection succeeds on the full block
+    band = _nan_valley_band(block, y_mm, smooth_px, rel, min_contrast)
+    if band is None:
         return {'x_mm': x_center_mm, 'valid': False, 'nan_frac': nan_frac,
-                'width_mean_mm': np.nan, 'width_std_mm': np.nan,
-                'boundary_left_mean_mm': np.nan, 'boundary_right_mean_mm': np.nan,
-                'edge_roughness_mm': np.nan, 'n_cols_used': 0}
+                **_INVALID_STATS}
+    left, right = band
 
-    # 4. per-column boundary detection, keep only successful columns
-    lefts, rights, widths = [], [], []
-    for idx in col_indices:
-        left, right, ok = _column_track_boundary(Z_mm[:, idx], y_mm, mad_k=mad_k)
-        if ok:
-            lefts.append(left)
-            rights.append(right)
-            widths.append(right - left)
-    n_valid_cols = len(widths)
+    # 4. local variation from sub-blocks of columns (needs >=2 detections)
+    sub_lefts, sub_rights = [], []
+    for sub in np.array_split(col_indices, VALLEY_N_SUBBLOCKS):
+        sub_band = _nan_valley_band(Z_mm[:, sub], y_mm, smooth_px, rel, min_contrast)
+        if sub_band is not None:
+            sub_lefts.append(sub_band[0])
+            sub_rights.append(sub_band[1])
+    if len(sub_lefts) >= 2:
+        sub_lefts = np.array(sub_lefts)
+        sub_rights = np.array(sub_rights)
+        width_std = float((sub_rights - sub_lefts).std())
+        edge_roughness = float((sub_lefts.std() + sub_rights.std()) / 2)
+    else:
+        width_std = np.nan
+        edge_roughness = np.nan
 
-    # 5. second gate: enough columns must have succeeded to trust the average
-    if n_valid_cols < min_valid_cols:
-        return {'x_mm': x_center_mm, 'valid': False, 'nan_frac': nan_frac,
-                'width_mean_mm': np.nan, 'width_std_mm': np.nan,
-                'boundary_left_mean_mm': np.nan, 'boundary_right_mean_mm': np.nan,
-                'edge_roughness_mm': np.nan, 'n_cols_used': n_valid_cols}
-
-    # 6. aggregate per-column results into this window's summary stats
-    lefts = np.array(lefts)
-    rights = np.array(rights)
-    widths = np.array(widths)
     return {
         'x_mm': x_center_mm,
         'valid': True,
         'nan_frac': nan_frac,
-        'width_mean_mm': float(widths.mean()),
-        'width_std_mm': float(widths.std()),
-        'boundary_left_mean_mm': float(lefts.mean()),
-        'boundary_right_mean_mm': float(rights.mean()),
-        'edge_roughness_mm': float((lefts.std() + rights.std()) / 2),
-        'n_cols_used': n_valid_cols,
+        'width_mean_mm': right - left,
+        'width_std_mm': width_std,
+        'boundary_left_mean_mm': left,
+        'boundary_right_mean_mm': right,
+        'edge_roughness_mm': edge_roughness,
+        'n_cols_used': int(col_indices.size),
     }
 
 
 def extract_local_width_stats(Z_mm, x_mm, y_mm, x_centers_mm, window_mm,
-                               nan_frac_max=0.6, min_valid_cols=5, mad_k=3.0):
+                               smooth_px=VALLEY_SMOOTH_PX,
+                               rel=VALLEY_REL_THRESH,
+                               min_contrast=VALLEY_MIN_CONTRAST):
     x_centers_mm = np.asarray(x_centers_mm)
     out = np.empty(len(x_centers_mm), dtype=_WIDTH_STATS_DTYPE)
     for i, xc in enumerate(x_centers_mm):
         r = local_width_stats_at_window(
             Z_mm, x_mm, y_mm, xc, window_mm,
-            nan_frac_max=nan_frac_max, min_valid_cols=min_valid_cols, mad_k=mad_k,
+            smooth_px=smooth_px, rel=rel, min_contrast=min_contrast,
         )
         out[i] = tuple(r[name] for name, _ in _WIDTH_STATS_DTYPE)
     return out
@@ -266,10 +296,10 @@ def build_track_samples(track_id, thermal_dir, sem_dir, height_dir, k=5):
     Task-1 height-map target stats at that same x. Frames at either end of
     the track without a full +/-k window are dropped.
 
-    Z_mm is plane-detrended before target-stat extraction: tracks have a
-    real physical mounting tilt (confirmed empirically — e.g. track 8's
-    untracked tilt shifts its median width estimate by >2x), which biases
-    the per-column MAD threshold in `_column_track_boundary` if left in.
+    Z_mm is plane-detrended before target-stat extraction. The NaN-valley
+    width target does not depend on it (detrending never touches NaN
+    structure), but the detrended heights stay physically meaningful for any
+    future height-based stats, and tracks do have a real mounting tilt.
     """
     thermal = extract_final_thermal_frames(thermal_dir, track_id)
     frames = thermal['frames']

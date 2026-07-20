@@ -1,0 +1,39 @@
+{
+  "anchor_metrics": "results/gp_baseline/20260716_151021/metrics.json",
+  "commit_hash": "ce69750c7f28f0b2b481dc57b32a111555ad9d1d",
+  "config": {
+    "b_bounds": [
+      0.1,
+      6.0
+    ],
+    "dataset_run": "20260716_151021",
+    "gp": "anchor config; x_mm dropped in phys_gp (anchor ARD: x_mm memorizes per-track profiles), kept in phys_gp_xmm",
+    "mean_function": "a*P**b, weighted LS on train fold (2 powers: exactly identified trend anchor, not a validated law)",
+    "power_mapping_note": "reversed vs task spec; inferred from width/SEM monotonicity + power-law consistency, user-approved, not organizer-confirmed",
+    "power_w": {
+      "10": 350.0,
+      "14": 300.0,
+      "21": 200.0,
+      "8": 400.0
+    },
+    "seed": 0,
+    "variant": "A-phys"
+  },
+  "config_hash": "15f247c1de454160e06755596a1b96b5",
+  "dataset_run": "20260716_151021",
+  "feature_file_md5": "b5cca17d269070cab60388ca072783a2",
+  "fitted_kernels": {
+    "phys_gp": [
+      "0.74**2 * RBF(length_scale=[38.4, 4.53, 1e+03, 1e+03, 12.1, 0.0824, 290, 658, 1e+03, 91.9, 0.363, 78.7, 424, 0.0377, 0.0287, 0.873, 144, 91.2]) + WhiteKernel(noise_level=0.415)",
+      "0.861**2 * RBF(length_scale=[99, 0.0288, 79.5, 19.5, 0.254, 0.0532, 526, 0.0907, 0.0577, 0.0678, 67.4, 1e+03, 9.26, 0.545, 11.4, 1.08, 41.7, 523]) + WhiteKernel(noise_level=0.163)",
+      "0.78**2 * RBF(length_scale=[213, 0.0359, 1e+03, 119, 0.536, 1e+03, 593, 613, 380, 1e+03, 0.212, 1e+03, 162, 262, 1e+03, 1e+03, 99.6, 0.115]) + WhiteKernel(noise_level=0.365)"
+    ],
+    "phys_gp_xmm": [
+      "0.779**2 * RBF(length_scale=[0.616, 140, 131, 131, 246, 273, 772, 739, 765, 118, 20, 207, 850, 1e+03, 1e+03, 109, 1e+03, 99.6, 0.0147]) + WhiteKernel(noise_level=0.418)",
+      "0.829**2 * RBF(length_scale=[543, 537, 252, 894, 0.858, 1e+03, 527, 156, 395, 172, 243, 1e+03, 299, 1e+03, 1e+03, 1e+03, 1.06, 0.998, 0.0147]) + WhiteKernel(noise_level=0.323)",
+      "0.865**2 * RBF(length_scale=[526, 207, 18.4, 201, 2.34, 30.7, 294, 0.976, 156, 131, 4.47, 1e+03, 119, 105, 92.8, 198, 1e+03, 1e+03, 0.0137]) + WhiteKernel(noise_level=0.268)"
+    ]
+  },
+  "git_dirty": true,
+  "seed": 0
+}
