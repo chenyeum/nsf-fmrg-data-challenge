@@ -396,8 +396,9 @@ extraction returns noise. User-approved fix (root-cause, not patch):
   (ordering 8>10>14>21 now correct), width/SEM-band ratios 0.94–1.20, valid counts
   383/363/374/358 (+8/+13/+11/+22), deterministic.
 - **5 residual narrow windows**: 3 weak-contrast marginal (t10 x=26.5/26.7/98.3),
-  2 plausible early-scan transients (t8 x=22.3, t14 x=24.3). Decision pending:
-  accept vs raise `VALLEY_MIN_CONTRAST` to ~0.45 (needs revalidation).
+  2 plausible early-scan transients (t8 x=22.3, t14 x=24.3). **Decision (2026-07-20):
+  accept as-is**, no threshold change, no revalidation. Affects <0.4% of ~1478 valid
+  windows -- not worth the re-sweep given the negligible practical impact.
 - New dataset build: `processed_data/datasets/20260716_151021` (exploratory).
 
 ## Phase 3 — probabilistic GP modeling on new labels (2026-07-16): the power law IS the model
@@ -558,9 +559,48 @@ Same-evening strategy probes (exploratory):
   but with per-track random sign (+0.71 vs −0.77) and an unknowable
   registration constant for t21 → boundary output needs the organizers'
   registration convention first; w(x) is the safe minimum deliverable.
-- Open questions sent to organizers (pending): ground-truth extraction
-  method + sampling Δx; metric for criterion (2); boundary registration
-  convention; uncertainty submission format.
+- Open questions originally sent to organizers, now mostly self-resolved
+  (2026-07-20): ground-truth extraction method + Δx and criterion (2)'s
+  metric and boundary registration convention are all being self-researched
+  rather than waited on (organizer won't disclose ground-truth process, and
+  the other two are judged equally unlikely to get an answer). Only
+  uncertainty submission format remains an actual question to organizers.
+
+**Organizer reply received (2026-07-20)**, directly on representation/
+evaluation (quoted, paraphrased below):
+- No prescribed width-extraction function exists. The height map itself IS
+  the ground truth; participants do their own post-processing on it
+  (width, boundaries, etc.) and must justify why the chosen representation
+  is physically meaningful and extracted *consistently* from the height-map
+  data. This resolves the "ground-truth extraction method" question — it
+  was never a hidden answer to guess, it's an open design choice we already
+  made (the NaN-valley window method) and need to justify in the report,
+  not reverse-engineer.
+- Representation is open: local width w_i(x), left/right boundary
+  functions, contour deviation, waviness, roughness, or a vector-valued
+  G_i(x) are all acceptable — but the track must NOT be reduced to a single
+  average width; local spatial variation along the scan direction must be
+  preserved. This confirms (no formula given, but directional intent is
+  explicit) that criterion (2) rewards genuine per-x local prediction over
+  a track-level constant — validates the current windowed-w(x) approach.
+- Evaluation considers: accuracy of the predicted representation against
+  measured local geometry; how well spatial variation along the track is
+  preserved; and, for probabilistic submissions, calibration/usefulness of
+  uncertainty.
+
+**Implication for boundary/centerline (still a firm skip, reasoning
+sharpened):** the "consistency" requirement the organizer states as the
+bar for any chosen representation is exactly the test boundary/centerline
+fails structurally — our thermal/SEM inputs at prediction time (track 21)
+carry only local, per-frame coordinates with no shared anchor to the height
+map's absolute stage coordinate, so no consistent boundary/centerline
+extraction is possible from the data we'd have at inference. This is no
+longer framed as "waiting on an organizer convention that isn't coming" —
+it's a self-contained justification against boundary/centerline by the
+organizer's own stated bar, independent of any reply. w(x) (a difference of
+two boundary estimates) cancels this unknown per-track offset; an absolute
+boundary or centerline position does not. Report should lead with this
+argument rather than "insufficient information from organizers."
 
 ## Session 2026-07-18: code review + shift toward report writing
 
@@ -657,3 +697,58 @@ the quantitative width-error number).
    decision are settled.
 8. Machine note: this 15GB-RAM box cannot afford DataLoader worker forks with
    the in-RAM dataset — keep `num_workers=0` in any future training script.
+
+## Session 2026-07-19: code review complete, output-scope decisions, ~1 week left
+
+**Code review finished**: `run_gp_calib_inflation.py`, `run_gp_baseline.py`,
+`run_cvae.py` all reviewed line-by-line, no correctness issues found. This
+closes out the review list from the 2026-07-18 resume point (only
+`sem_substrate_screen.py`/`_aligned.py`, `preprocessing.py` diff, and
+`step0_acceptance_sweep.py` remain unreviewed — lower priority, not blocking).
+
+**Committed**: `d678bb4` "reviewed main code" — all the dirty-tree work from
+2026-07-16 through -18 (NaN-valley redefinition, thermal_features.py, all
+run_gp_*.py / run_cvae.py / run_linear_baseline.py scripts, results/) is now
+in git. Accidentally included `scripts/.run_cvae.py.kate-swp` (editor swap
+file); removed from tracking and added `.*.kate-swp` to `.gitignore` in a
+follow-up commit (user to make).
+
+**Output-scope decision (user, 2026-07-19)**: revisited the open organizer
+questions from the 2026-07-17 evaluation-criteria note (registration
+convention, uncertainty format, etc. — still unanswered). User will ask the
+organizers again tomorrow (2026-07-20). Working assumption until a reply
+arrives:
+- **Uncertainty format**: self-decide. Low risk — pick a standard,
+  documented representation (e.g. per-x mean ± sigma), state the assumption
+  in the report. Worst case is a format mismatch, not a wrong number.
+- **Boundary/centerline output**: leaning toward NOT submitting unless the
+  organizers confirm the registration convention. Reason: the registration
+  constant was found to be per-track random-sign (+0.71 vs −0.77, see
+  evaluation-criteria note) — not an estimation-precision problem but an
+  actually-unknowable quantity from our data alone, so guessing risks hurting
+  criterion (1)/(3) rather than just leaving an optional field blank. `w(x)`
+  remains the safe required minimum and is unaffected either way.
+
+**Timeline check**: user estimates ~1 week remaining and considers it
+sufficient for the remaining build (x-trend LOTO test, marginal-window
+decision, `predict_track21.py`, then report writing).
+
+**Follow-up to organizers (2026-07-20)**: narrowed to 1 question —
+uncertainty submission format. The other three (ground-truth extraction
+method + Δx, metric for criterion (2), boundary registration convention)
+are all dropped from the ask: organizer already indicated the ground-truth
+process won't be disclosed, and user judged the same is true for criterion
+(2)'s metric and the registration convention — self-research/self-decide
+all three instead of waiting.
+
+This hardens the earlier "leaning toward NOT submitting boundary/centerline
+unless organizers confirm registration convention" into a firm decision:
+skip boundary/centerline entirely (no confirmation is coming). For
+criterion (2) (spatial-variation fidelity), design and document our own
+reasonable fidelity metric/argument in the report rather than waiting for
+theirs.
+
+**Next up (unchanged priority order)**: x-trend LOTO test → marginal-window
+(`VALLEY_MIN_CONTRAST`) decision → `scripts/predict_track21.py` → report
+writing. Boundary/uncertainty format decisions unblock after tomorrow's
+organizer follow-up.
