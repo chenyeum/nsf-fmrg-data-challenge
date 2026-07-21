@@ -1,0 +1,15 @@
+{
+  "commit": "0a3b720a48bcc5d82d3ff093afdd098db5d4e6ae",
+  "config": {
+    "primary_model": "linear3 BayesianRidge",
+    "submitted_columns": [
+      "x_mm",
+      "width_mm",
+      "width_sigma_mm"
+    ],
+    "uncertainty_format": "per-x Gaussian mean +/- sigma, cross-fold inflated"
+  },
+  "config_hash": "65176efcf027e9ef899dc3d87e105d14",
+  "dataset_run": "20260716_151021",
+  "dirty": true
+}

@@ -1,0 +1,22 @@
+{
+  "gp_kernel": "DotProduct(sigma_0=0.001) + WhiteKernel(noise_level=0.951)",
+  "inflation": {
+    "loto_biases_mm": [
+      -0.1701089724589866,
+      0.028814924232428152,
+      -0.12852557958560173
+    ],
+    "v_final_mm2": 0.01542872899246256
+  },
+  "model": "phys_gp_linear3",
+  "noise_floor_mm": 0.006820269035058963,
+  "power_law": {
+    "a": 0.00020421814448946167,
+    "b": 1.4161770111073775,
+    "m_t21_mm": 0.3704760244546719
+  },
+  "sanity_check": {
+    "ok": true,
+    "problems": []
+  }
+}

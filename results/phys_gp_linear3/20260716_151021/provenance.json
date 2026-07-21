@@ -1,0 +1,12 @@
+{
+  "commit": "0a3b720a48bcc5d82d3ff093afdd098db5d4e6ae",
+  "config": {
+    "featurizer": "run_linear_baseline.VARIANTS[linear3]",
+    "model": "phys_gp_linear3 (power-law mean + DotProduct-kernel residual GP on linear3 features, x_mm dropped)",
+    "seed": 0
+  },
+  "config_hash": "bfc3595d7eb5a693b769e3a32eeb9de3",
+  "dataset_run": "20260716_151021",
+  "dirty": true,
+  "t21_access_note": "track_21_samples.pkl / t21inputs.npz read input-side only, as in run_linear_baseline.py; noise floor uses the pooled dev-track median wstd/n_cols since width was never computed for track 21."
+}
